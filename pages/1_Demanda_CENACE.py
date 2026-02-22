@@ -145,26 +145,42 @@ def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFr
     if isinstance(d, str):
         d = json.loads(d)
 
-    df = pd.DataFrame(d)
+   df = _parse_cenace_response(data)
+# filtra al rango por si viene extra
+df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] < end_dt)].copy()
+return df
+    
+
+def load_demand(system: str, start_dt: datetime, end_dt: datetime, batch_days: int = 7) -> pd.DataFrame:
+    """Une batches y regresa una serie completa (timestamp, demand_mw)."""
+    parts = []
+
+    for a, b in _date_range_batches(start_dt, end_dt, batch_days=batch_days):
+        parts.append(fetch_cenace(system, a, b))
+
+    # filtra vacíos
+    parts = [p for p in parts if (isinstance(p, pd.DataFrame) and not p.empty)]
+
+    if not parts:
+        return pd.DataFrame(columns=["timestamp", "demand_mw"])
+
+    df = pd.concat(parts, ignore_index=True)
+
+    # si fetch_cenace no normalizó, intentamos normalizar aquí
+    if "timestamp" not in df.columns or "demand_mw" not in df.columns:
+        try:
+            df = _parse_cenace_response({"d": df.to_json(orient="records")})
+        except Exception:
+            st.error(f"Columnas recibidas: {list(df.columns)}")
+            return pd.DataFrame(columns=["timestamp", "demand_mw"])
+
+    df = (
+        df.drop_duplicates(subset=["timestamp"])
+          .sort_values("timestamp")
+          .reset_index(drop=True)
+    )
 
     return df
-
-parts = []
-
-for a, b in _date_range_batches(start_dt, end_dt, batch_days=batch_days):
-    parts.append(fetch_cenace(system, a, b))
-
-# NUEVO BLOQUE 👇
-parts = [p for p in parts if not p.empty]
-
-if not parts:
-    return pd.DataFrame(columns=["timestamp", "demand_mw"])
-
-df = pd.concat(parts, ignore_index=True)\
-       .drop_duplicates(subset=["timestamp"])\
-       .sort_values("timestamp")
-
-return df.reset_index(drop=True)
 
 def quality_report(df: pd.DataFrame):
     """Reporte simple de calidad + chequeos básicos."""
