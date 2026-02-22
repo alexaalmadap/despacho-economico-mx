@@ -149,15 +149,22 @@ def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFr
 
     return df
 
-def load_demand(system: str, start_dt: datetime, end_dt: datetime, batch_days: int = 7) -> pd.DataFrame:
-    """Une batches y regresa una serie completa."""
-    parts = []
-    for a, b in _date_range_batches(start_dt, end_dt, batch_days=batch_days):
-        parts.append(fetch_cenace(system, a, b))
-    if not parts:
-        return pd.DataFrame(columns=["timestamp", "demand_mw"])
-    df = pd.concat(parts, ignore_index=True).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
-    return df.reset_index(drop=True)
+parts = []
+
+for a, b in _date_range_batches(start_dt, end_dt, batch_days=batch_days):
+    parts.append(fetch_cenace(system, a, b))
+
+# NUEVO BLOQUE 👇
+parts = [p for p in parts if not p.empty]
+
+if not parts:
+    return pd.DataFrame(columns=["timestamp", "demand_mw"])
+
+df = pd.concat(parts, ignore_index=True)\
+       .drop_duplicates(subset=["timestamp"])\
+       .sort_values("timestamp")
+
+return df.reset_index(drop=True)
 
 def quality_report(df: pd.DataFrame):
     """Reporte simple de calidad + chequeos básicos."""
