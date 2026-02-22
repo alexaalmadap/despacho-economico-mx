@@ -149,27 +149,24 @@ def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFr
 # filtra al rango por si viene extra
 df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] < end_dt)].copy()
 return df
-    
-
 def load_demand(system: str, start_dt: datetime, end_dt: datetime, batch_days: int = 7) -> pd.DataFrame:
     """Une batches y regresa una serie completa (timestamp, demand_mw)."""
     parts = []
 
     for a, b in _date_range_batches(start_dt, end_dt, batch_days=batch_days):
-        parts.append(fetch_cenace(system, a, b))
-
-    # filtra vacíos
-    parts = [p for p in parts if (isinstance(p, pd.DataFrame) and not p.empty)]
+        df_part = fetch_cenace(system, a, b)
+        if isinstance(df_part, pd.DataFrame) and not df_part.empty:
+            parts.append(df_part)
 
     if not parts:
         return pd.DataFrame(columns=["timestamp", "demand_mw"])
 
     df = pd.concat(parts, ignore_index=True)
 
-    # si fetch_cenace no normalizó, intentamos normalizar aquí
+    # Si vienen columnas raras, intenta normalizar con el parser
     if "timestamp" not in df.columns or "demand_mw" not in df.columns:
         try:
-            df = _parse_cenace_response({"d": df.to_json(orient="records")})
+            df = _parse_cenace_response({"d": df.to_dict(orient="records")})
         except Exception:
             st.error(f"Columnas recibidas: {list(df.columns)}")
             return pd.DataFrame(columns=["timestamp", "demand_mw"])
@@ -181,7 +178,6 @@ def load_demand(system: str, start_dt: datetime, end_dt: datetime, batch_days: i
     )
 
     return df
-
 def quality_report(df: pd.DataFrame):
     """Reporte simple de calidad + chequeos básicos."""
     if df.empty:
