@@ -1,4 +1,3 @@
-import os
 import json
 from datetime import datetime, timedelta
 import pandas as pd
@@ -99,44 +98,54 @@ def _parse_cenace_response(resp_json) -> pd.DataFrame:
 
     return out
 
+
 def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     """
-    Descarga demanda de CENACE para un sistema (SIN/BCA/BCS/Total según soporte del endpoint)
-    por un rango. Usa cache en disco (parquet).
+    Descarga demanda de CENACE usando:
+    1) GET inicial para obtener cookies
+    2) POST con headers tipo navegador
     """
-    cache_file = _cache_path(system, start_dt, end_dt)
-    if os.path.exists(cache_file):
-        return pd.read_parquet(cache_file)
 
-    # IMPORTANTE:
-    # Este endpoint suele aceptar POST con JSON.
-    # Como no tenemos el contrato exacto aquí, hacemos 2 intentos:
-    # 1) Sin body (algunos devuelven lo más reciente)
-    # 2) Con body típico (si falla el primero)
-    headers = {"Content-Type": "application/json; charset=UTF-8"}
+    BASE_URL = "https://www.cenace.gob.mx"
+    LANDING_URL = f"{BASE_URL}/GraficaDemanda.aspx"
+    CENACE_URL = f"{BASE_URL}/GraficaDemanda.aspx/obtieneValoresTotal"
 
-    # Intento 1: POST vacío
-    try:
-        r = requests.post(CENACE_URL, headers=headers, timeout=30)
+    s = requests.Session()
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+        "Referer": LANDING_URL,
+        "Origin": BASE_URL,
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/json; charset=UTF-8",
+    }
+
+    # Paso 1: obtener cookies
+    s.get(LANDING_URL, headers={"User-Agent": headers["User-Agent"]}, timeout=30)
+
+    payload = {
+        "sistema": system,
+        "fechaInicio": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "fechaFin": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    r = s.post(CENACE_URL, headers=headers, json=payload, timeout=60)
+
+    if r.status_code != 200:
+        st.error(f"CENACE respondió {r.status_code}")
+        st.error(r.text[:300])
         r.raise_for_status()
-        df = _parse_cenace_response(r.json())
-    except Exception:
-        # Intento 2: body típico (puede que el endpoint requiera fechas y/o sistema)
-        # OJO: esto puede necesitar ajuste según lo que realmente acepte CENACE.
-        body = {
-            "fechaInicio": start_dt.strftime("%d/%m/%Y"),
-            "fechaFin": (end_dt - timedelta(days=1)).strftime("%d/%m/%Y"),
-            "sistema": system
-        }
-        r = requests.post(CENACE_URL, headers=headers, data=json.dumps(body), timeout=30)
-        r.raise_for_status()
-        df = _parse_cenace_response(r.json())
 
-    # Filtra rango por si el endpoint trae más datos de los pedidos
-    df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] < end_dt)].copy()
+    data = r.json()
+    d = data.get("d", data)
 
-    # Guarda cache
-    df.to_parquet(cache_file, index=False)
+    if isinstance(d, str):
+        d = json.loads(d)
+
+    df = pd.DataFrame(d)
+
     return df
 
 def load_demand(system: str, start_dt: datetime, end_dt: datetime, batch_days: int = 7) -> pd.DataFrame:
