@@ -137,7 +137,7 @@ def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFr
     if r.status_code != 200:
         st.error(f"CENACE respondió {r.status_code}")
         st.error(r.text[:300])
-        r.raise_for_status()
+        return pd.DataFrame()
 
     data = r.json()
     d = data.get("d", data)
