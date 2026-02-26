@@ -10,7 +10,7 @@ import streamlit as st
 # Config
 # ----------------------------
 # ✅ CAMBIO 1: Usamos la API oficial de CENACE (ws01), no la página web
-BASE_WS = "https://ws01.cenace.gob.mx:8082/SWEDREZC/SIM"
+BASE_WS = "https://ws01.cenace.gob.mx:8082/SWPDEZC/SIM"
 
 # Las zonas de carga que representan cada sistema completo
 # ✅ CAMBIO 2: Cada sistema tiene su zona de carga principal
@@ -48,44 +48,55 @@ def _cache_path(system: str, start_dt: datetime, end_dt: datetime) -> str:
 
 def _parse_cenace_response(data: dict, system: str) -> pd.DataFrame:
     """
-    Convierte la respuesta de la API oficial ws01 a DataFrame con columnas:
-    timestamp, demand_mw
-    
-    La respuesta tiene esta forma:
+    Parsea respuesta del SWPDEZC de CENACE.
+    Estructura real:
     {
+      "Sistema": "SIN",
+      "Proceso": "MDA",
+      "Zona de Carga": "SIN",
       "Resultados": [
-        {
-          "zona_carga": "SIN",
-          "fecha": "2025-01-01",
-          "hora": "1",
-          "demanda": "35000.5"
-        }, ...
+        {"fecha": "2026-02-11", "hora": "1", "Demanda": "35000.5"},
+        ...
       ]
     }
     """
-    # ✅ CAMBIO 3: Parseamos la estructura real de la API oficial
-    if "Resultados" not in data:
-        raise ValueError(f"La respuesta no tiene 'Resultados'. Claves recibidas: {list(data.keys())}")
+    resultados = None
     
-    resultados = data["Resultados"]
+    # Buscar "Resultados" en cualquier nivel del JSON
+    if "Resultados" in data:
+        resultados = data["Resultados"]
+    elif isinstance(data, list):
+        resultados = data
+    else:
+        # Buscar dentro de listas anidadas
+        for v in data.values():
+            if isinstance(v, list) and len(v) > 0:
+                resultados = v
+                break
     
     if not resultados:
-        return pd.DataFrame(columns=["timestamp", "demand_mw"])
+        raise ValueError(f"No encontré datos en la respuesta. Claves: {list(data.keys()) if isinstance(data, dict) else type(data)}")
     
     rows = []
     for r in resultados:
-        # La API devuelve fecha y hora por separado
-        # Hora va de 1 a 24, donde hora 1 = 00:00, hora 24 = 23:00
-        fecha = r.get("fecha", "")
-        hora = int(r.get("hora", 1)) - 1  # convertir a 0-23
-        demanda = r.get("demanda", None)
+        if not isinstance(r, dict):
+            continue
+        # Buscar campo de fecha (puede llamarse "fecha" o "Fecha")
+        fecha = r.get("fecha") or r.get("Fecha") or r.get("FECHA", "")
+        # Buscar campo de hora
+        hora_raw = r.get("hora") or r.get("Hora") or r.get("HORA", "1")
+        # Buscar campo de demanda (puede llamarse "Demanda", "demanda", "valor", etc.)
+        demanda_raw = (r.get("Demanda") or r.get("demanda") or 
+                       r.get("valor") or r.get("Valor") or
+                       r.get("pronostico") or r.get("Pronostico"))
         
         try:
+            hora = int(float(hora_raw)) - 1  # CENACE usa horas 1-24, convertimos a 0-23
             ts = datetime.strptime(fecha, "%Y-%m-%d") + timedelta(hours=hora)
-            demand_val = float(demanda)
+            demand_val = float(demanda_raw)
             rows.append({"timestamp": ts, "demand_mw": demand_val})
         except Exception:
-            continue  # Si algún registro falla, lo saltamos
+            continue
     
     if not rows:
         return pd.DataFrame(columns=["timestamp", "demand_mw"])
@@ -110,8 +121,8 @@ def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFr
     zona = ZONAS.get(system, system)
     
     # ✅ CAMBIO 4: Construimos la URL con los parámetros en la ruta (método GET, no POST)
-    url = (
-        f"{BASE_WS}/{system}"
+   url = (
+        f"{BASE_WS}/{system}/MDA/{system}"
         f"/{start_dt.strftime('%Y')}/{start_dt.strftime('%m')}/{start_dt.strftime('%d')}"
         f"/{end_dt.strftime('%Y')}/{end_dt.strftime('%m')}/{end_dt.strftime('%d')}"
         f"/JSON"
