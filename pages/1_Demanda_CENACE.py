@@ -9,22 +9,29 @@ import streamlit as st
 # ----------------------------
 # Config
 # ----------------------------
-BASE_URL = "https://www.cenace.gob.mx"
-LANDING_URL = f"{BASE_URL}/GraficaDemanda.aspx"
-CENACE_URL = f"{BASE_URL}/GraficaDemanda.aspx/obtieneValoresTotal"
+# ✅ CAMBIO 1: Usamos la API oficial de CENACE (ws01), no la página web
+BASE_WS = "https://ws01.cenace.gob.mx:8082/SWDREZC/SIM"
 
-CACHE_DIR = "data_cache"  # Streamlit Cloud permite escribir aquí
+# Las zonas de carga que representan cada sistema completo
+# ✅ CAMBIO 2: Cada sistema tiene su zona de carga principal
+ZONAS = {
+    "SIN": "SIN",    # Sistema Interconectado Nacional
+    "BCA": "BCA",    # Baja California
+    "BCS": "BCS",    # Baja California Sur
+}
+
+CACHE_DIR = "data_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 st.title("Demanda CENACE (Semana 2)")
-st.write("Descarga por API de CENACE + batching (≤7 días) + cache en disco + checks de calidad.")
+st.write("Descarga por API oficial de CENACE + batching (≤7 días) + cache en disco + checks de calidad.")
 
 # ----------------------------
 # Helpers
 # ----------------------------
 
 def _date_range_batches(start_dt: datetime, end_dt: datetime, batch_days: int = 7):
-    """Genera rangos [start, end) en bloques de batch_days."""
+    """Genera rangos en bloques de batch_days días."""
     cur = start_dt
     while cur < end_dt:
         nxt = min(cur + timedelta(days=batch_days), end_dt)
@@ -34,74 +41,63 @@ def _date_range_batches(start_dt: datetime, end_dt: datetime, batch_days: int = 
 
 def _cache_path(system: str, start_dt: datetime, end_dt: datetime) -> str:
     """Ruta de cache por sistema y rango."""
-    s = start_dt.strftime("%Y%m%d%H")
-    e = end_dt.strftime("%Y%m%d%H")
+    s = start_dt.strftime("%Y%m%d")
+    e = end_dt.strftime("%Y%m%d")
     return os.path.join(CACHE_DIR, f"demanda_{system}_{s}_{e}.parquet")
 
 
-def _parse_cenace_response(resp_json) -> pd.DataFrame:
+def _parse_cenace_response(data: dict, system: str) -> pd.DataFrame:
     """
-    Convierte la respuesta típica de servicios .aspx (a veces viene en resp_json['d'] como string JSON)
-    a un DataFrame con columnas: timestamp, demand_mw
+    Convierte la respuesta de la API oficial ws01 a DataFrame con columnas:
+    timestamp, demand_mw
+    
+    La respuesta tiene esta forma:
+    {
+      "Resultados": [
+        {
+          "zona_carga": "SIN",
+          "fecha": "2025-01-01",
+          "hora": "1",
+          "demanda": "35000.5"
+        }, ...
+      ]
+    }
     """
-    # Caso común ASP.NET: {"d":"[...]"} donde d es string con JSON adentro
-    if isinstance(resp_json, dict) and "d" in resp_json:
-        payload = resp_json["d"]
-        if isinstance(payload, str):
-            data = json.loads(payload)
-        else:
-            data = payload
-    else:
-        data = resp_json
-
-    df = pd.DataFrame(data)
-
-    # Encuentra columnas candidatas para tiempo
-    col_time = None
-    for c in df.columns:
-        if str(c).lower() in ["fecha", "fechahora", "fecha_hora", "hora", "timestamp", "datetime", "fecha_hora_local"]:
-            col_time = c
-            break
-    if col_time is None:
-        # toma la primera columna tipo object como fallback
-        for c in df.columns:
-            if df[c].dtype == object:
-                col_time = c
-                break
-
-    # Encuentra columnas candidatas para valor
-    col_val = None
-    for c in df.columns:
-        if str(c).lower() in ["valor", "mw", "demanda", "demanda_mw", "value", "y"]:
-            col_val = c
-            break
-    if col_val is None:
-        # primera numérica
-        for c in df.columns:
-            if pd.api.types.is_numeric_dtype(df[c]):
-                col_val = c
-                break
-
-    if col_time is None or col_val is None:
-        raise ValueError(f"No pude identificar columnas tiempo/valor. Columnas: {list(df.columns)}")
-
-    out = df[[col_time, col_val]].copy()
-    out.columns = ["timestamp_raw", "demand_mw"]
-
-    out["timestamp"] = pd.to_datetime(out["timestamp_raw"], errors="coerce", dayfirst=True)
-    out["demand_mw"] = pd.to_numeric(out["demand_mw"], errors="coerce")
-
-    out = out.drop(columns=["timestamp_raw"])
-    out = out.dropna(subset=["timestamp", "demand_mw"]).sort_values("timestamp").reset_index(drop=True)
-
-    return out
+    # ✅ CAMBIO 3: Parseamos la estructura real de la API oficial
+    if "Resultados" not in data:
+        raise ValueError(f"La respuesta no tiene 'Resultados'. Claves recibidas: {list(data.keys())}")
+    
+    resultados = data["Resultados"]
+    
+    if not resultados:
+        return pd.DataFrame(columns=["timestamp", "demand_mw"])
+    
+    rows = []
+    for r in resultados:
+        # La API devuelve fecha y hora por separado
+        # Hora va de 1 a 24, donde hora 1 = 00:00, hora 24 = 23:00
+        fecha = r.get("fecha", "")
+        hora = int(r.get("hora", 1)) - 1  # convertir a 0-23
+        demanda = r.get("demanda", None)
+        
+        try:
+            ts = datetime.strptime(fecha, "%Y-%m-%d") + timedelta(hours=hora)
+            demand_val = float(demanda)
+            rows.append({"timestamp": ts, "demand_mw": demand_val})
+        except Exception:
+            continue  # Si algún registro falla, lo saltamos
+    
+    if not rows:
+        return pd.DataFrame(columns=["timestamp", "demand_mw"])
+    
+    df = pd.DataFrame(rows)
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    return df
 
 
 def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     """
-    Descarga demanda de CENACE usando:
-    1) GET inicial para obtener cookies
-    2) POST con headers tipo navegador
+    Descarga demanda de CENACE usando la API oficial REST (GET).
     Devuelve DataFrame con columnas: timestamp, demand_mw
     """
     cache_file = _cache_path(system, start_dt, end_dt)
@@ -109,52 +105,55 @@ def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFr
         try:
             return pd.read_parquet(cache_file)
         except Exception:
-            # si falla leer parquet, seguimos sin cache
-            pass
+            pass  # Si falla el cache, continuamos y re-descargamos
 
-    s = requests.Session()
-
+    zona = ZONAS.get(system, system)
+    
+    # ✅ CAMBIO 4: Construimos la URL con los parámetros en la ruta (método GET, no POST)
+    url = (
+        f"{BASE_WS}/{system}/{zona}"
+        f"/{start_dt.strftime('%Y')}/{start_dt.strftime('%m')}/{start_dt.strftime('%d')}"
+        f"/{end_dt.strftime('%Y')}/{end_dt.strftime('%m')}/{end_dt.strftime('%d')}"
+        f"/JSON"
+    )
+    
+    # ✅ CAMBIO 5: Usamos GET con headers simples, no POST con JSON body
     headers = {
         "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
-        "Referer": LANDING_URL,
-        "Origin": BASE_URL,
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/json; charset=UTF-8",
+        "Accept": "application/json",
     }
-
-    # Paso 1: obtener cookies
-    s.get(LANDING_URL, headers={"User-Agent": headers["User-Agent"]}, timeout=30)
-
-    payload = {
-        "sistema": system,
-        "fechaInicio": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "fechaFin": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-    r = s.post(CENACE_URL, headers=headers, json=payload, timeout=60)
-
+    
+    try:
+        r = requests.get(url, headers=headers, timeout=60, verify=True)
+    except requests.exceptions.SSLError:
+        # ✅ CAMBIO 6: Fallback si hay problema de SSL (común en servidores gov)
+        r = requests.get(url, headers=headers, timeout=60, verify=False)
+    
     if r.status_code != 200:
-        st.error(f"CENACE respondió {r.status_code}")
+        st.error(f"CENACE respondió {r.status_code} para {system}")
+        st.error(f"URL consultada: {url}")
         st.error(r.text[:300])
         return pd.DataFrame(columns=["timestamp", "demand_mw"])
 
-    data = r.json()
-
-    # Normaliza a (timestamp, demand_mw)
     try:
-        df = _parse_cenace_response(data)
+        data = r.json()
+    except Exception as e:
+        st.error(f"No se pudo leer el JSON de CENACE: {e}")
+        st.error(r.text[:300])
+        return pd.DataFrame(columns=["timestamp", "demand_mw"])
+
+    try:
+        df = _parse_cenace_response(data, system)
     except Exception as e:
         st.error("No pude parsear la respuesta de CENACE.")
         st.error(str(e))
-        st.json(data if isinstance(data, dict) else {"data": str(type(data))})
+        st.json(data if isinstance(data, dict) else {})
         return pd.DataFrame(columns=["timestamp", "demand_mw"])
 
-    # Filtra al rango por si viene extra
+    # Filtra exactamente al rango pedido
     df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] < end_dt)].copy()
 
-    # Guarda cache si se puede
+    # Guarda en cache
     try:
         df.to_parquet(cache_file, index=False)
     except Exception:
@@ -176,26 +175,18 @@ def load_demand(system: str, start_dt: datetime, end_dt: datetime, batch_days: i
         return pd.DataFrame(columns=["timestamp", "demand_mw"])
 
     df = pd.concat(parts, ignore_index=True)
-
     df = (
         df.drop_duplicates(subset=["timestamp"])
           .sort_values("timestamp")
           .reset_index(drop=True)
     )
-
     return df
 
 
 def quality_report(df: pd.DataFrame):
-    """Reporte simple de calidad + chequeos básicos."""
+    """Reporte de calidad del dataset."""
     if df.empty:
-        return {
-            "rows": 0,
-            "nan_values": None,
-            "negatives": None,
-            "duplicates": None,
-            "time_gaps": None,
-        }
+        return {"rows": 0, "nan_values": None, "negatives": None, "duplicates": None, "time_gaps": None}
 
     rows = int(len(df))
     nan_values = int(df["demand_mw"].isna().sum())
@@ -224,10 +215,22 @@ with col1:
 with col2:
     days = st.slider("Días a descargar (para probar)", min_value=1, max_value=14, value=7)
 
-end_dt = datetime.now().replace(minute=0, second=0, microsecond=0)
+# ✅ CAMBIO 7: Usamos fechas pasadas (la API no tiene datos futuros ni de "hoy")
+end_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
 start_dt = end_dt - timedelta(days=int(days))
 
-st.caption(f"Rango: {start_dt} → {end_dt} (batching de {min(7, int(days))} días)")
+st.caption(f"Rango: {start_dt.date()} → {end_dt.date()} (batching de {min(7, int(days))} días)")
+
+# ✅ CAMBIO 8: Mostramos la URL que se va a consultar para debugging
+with st.expander("🔧 Ver URL que se consultará"):
+    zona = ZONAS.get(system, system)
+    url_preview = (
+        f"{BASE_WS}/{system}/{zona}"
+        f"/{start_dt.strftime('%Y')}/{start_dt.strftime('%m')}/{start_dt.strftime('%d')}"
+        f"/{end_dt.strftime('%Y')}/{end_dt.strftime('%m')}/{end_dt.strftime('%d')}"
+        f"/JSON"
+    )
+    st.code(url_preview)
 
 if st.button("Descargar y graficar"):
     with st.spinner("Descargando desde CENACE (con cache + batching)..."):
@@ -240,7 +243,7 @@ if st.button("Descargar y graficar"):
     if not df.empty:
         st.line_chart(df.set_index("timestamp")["demand_mw"])
     else:
-        st.warning("No llegaron datos (df vacío).")
+        st.warning("No llegaron datos. Revisa la URL en el expander de arriba.")
 
     st.subheader("Reporte de calidad")
     st.json(quality_report(df))
