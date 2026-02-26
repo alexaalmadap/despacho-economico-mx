@@ -111,7 +111,7 @@ def fetch_cenace(system: str, start_dt: datetime, end_dt: datetime) -> pd.DataFr
     
     # ✅ CAMBIO 4: Construimos la URL con los parámetros en la ruta (método GET, no POST)
     url = (
-        f"{BASE_WS}/{system}/{zona}"
+        f"{BASE_WS}/{system}"
         f"/{start_dt.strftime('%Y')}/{start_dt.strftime('%m')}/{start_dt.strftime('%d')}"
         f"/{end_dt.strftime('%Y')}/{end_dt.strftime('%m')}/{end_dt.strftime('%d')}"
         f"/JSON"
