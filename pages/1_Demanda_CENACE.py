@@ -10,7 +10,7 @@ import streamlit as st
 # Config
 # ----------------------------
 # ✅ CAMBIO 1: Usamos la API oficial de CENACE (ws01), no la página web
-BASE_WS = "https://ws01.cenace.gob.mx:8082/SWDREZC/SIM"
+BASE_WS = "https://ws01.cenace.gob.mx:8082/SWEDREZC/SIM"
 
 # Las zonas de carga que representan cada sistema completo
 # ✅ CAMBIO 2: Cada sistema tiene su zona de carga principal
