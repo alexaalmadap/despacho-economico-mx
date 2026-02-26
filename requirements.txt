@@ -1,7 +1,7 @@
-streamlit
-pandas
-numpy
-plotly
-requests
-pyarrow
-pytz
+streamlit>=1.32.0
+pandas>=2.0.0
+numpy>=1.26.0
+plotly>=5.18.0
+requests>=2.31.0
+pyarrow>=15.0.0
+pytz>=2024.1
