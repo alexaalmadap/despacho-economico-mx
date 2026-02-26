@@ -216,7 +216,7 @@ with col2:
     days = st.slider("Días a descargar (para probar)", min_value=1, max_value=14, value=7)
 
 # ✅ CAMBIO 7: Usamos fechas pasadas (la API no tiene datos futuros ni de "hoy")
-end_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+end_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=8)
 start_dt = end_dt - timedelta(days=int(days))
 
 st.caption(f"Rango: {start_dt.date()} → {end_dt.date()} (batching de {min(7, int(days))} días)")
